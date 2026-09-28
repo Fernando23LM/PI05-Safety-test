@@ -36,7 +36,7 @@ echo "node=$(hostname) gpu=$(nvidia-smi --query-gpu=name,driver_version,memory.t
 isaac() {
   apptainer exec --nv --writable-tmpfs --cleanenv --home "$ISAAC_HOME" --bind "$SCR" \
     --env OMNI_KIT_ACCEPT_EULA=YES --env ACCEPT_EULA=Y --env PRIVACY_CONSENT=Y \
-    --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+    --env PYTHONUNBUFFERED=1 \
     "$SIF" "$SCR/sim-evals/.venv/bin/python" "$@"
 }
 cd "$ALIGN"   # relative paths in EXTRA (e.g. isaac/tasks.example.json) resolve here; sim-evals finds its assets itself
