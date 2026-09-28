@@ -20,16 +20,21 @@ set -uo pipefail
 
 SCR=/scratch/gilbreth/$USER
 ALIGN=$SCR/pi05-align
-SIF=$SCR/containers/isaac-sim-5.0.0.sif
-ISAAC_HOME=$SCR/isaac-home
+ISAAC_DIR=${ISAAC_DIR:-$SCR/isaac}   # existing Isaac Sim install: isaac-sim.sif + cache folders
+ISAAC_HOME=$ISAAC_DIR/home
+SIF=$ISAAC_DIR/isaac-sim.sif
+[ -f "$ISAAC_HOME/.pi05align.env" ] && source "$ISAAC_HOME/.pi05align.env"   # container chosen by setup
+export APPTAINER_CACHEDIR=$ISAAC_DIR/apptainer_cache APPTAINER_TMPDIR=$ISAAC_DIR/apptainer_tmp
 source ~/.bashrc.pi05align
 module load apptainer 2>/dev/null || true
 [ -f "$ISAAC_HOME/.eula_accepted" ] || { echo "run isaac/setup_isaac_gilbreth.sh first (with ACCEPT_NVIDIA_EULA=1)"; exit 1; }
 echo "node=$(hostname) gpu=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader)"
 
-# Isaac Sim inside the container; host /scratch is mounted at the same path.
+# Isaac Sim inside the container; host /scratch is mounted at the same path. Mirrors the invocation
+# already proven on an A10 here (--nv --writable-tmpfs, EULA/privacy env), but runs sim-evals' venv
+# Python instead of /isaac-sim/python.sh, with the container home (and so ~/.cache) on scratch.
 isaac() {
-  apptainer exec --nv --cleanenv --home "$ISAAC_HOME" --bind "$SCR" \
+  apptainer exec --nv --writable-tmpfs --cleanenv --home "$ISAAC_HOME" --bind "$SCR" \
     --env OMNI_KIT_ACCEPT_EULA=YES --env ACCEPT_EULA=Y --env PRIVACY_CONSENT=Y \
     --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     "$SIF" "$SCR/sim-evals/.venv/bin/python" "$@"

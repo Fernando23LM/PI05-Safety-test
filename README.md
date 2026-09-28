@@ -178,28 +178,33 @@ inspecting doesn't change the robot's behaviour.
 
 ### How it runs on Gilbreth: Apptainer
 
-Isaac Sim is **not installed on the host**. It runs inside NVIDIA's Isaac Sim 5.0 container, via Apptainer:
+Isaac Sim is **not installed on the host**. It runs inside the Isaac Sim container that is already
+installed in `/scratch/gilbreth/$USER/isaac/`, via Apptainer:
 
 ```
 Gilbreth A10 node (one Slurm job)
 ├── host:      inspector_server.py   (openpi env, JAX, π0.5 or π0-FAST)  ── websocket on localhost ──┐
-└── container: isaac-sim-5.0.0.sif   (apptainer exec --nv)                                           │
+└── container: isaac/isaac-sim.sif   (apptainer exec --nv)                                           │
                └── sim-evals venv → inspect_eval.py (Isaac Sim + DROID scene) ◄──────────────────────┘
 ```
 
-- **Why a container:** Isaac Sim 5.0 needs newer system libraries (glibc 2.35, Vulkan) than the cluster OS provides. The container supplies them.
+- **Why a container:** Isaac Sim needs newer system libraries (glibc 2.35, Vulkan) than the cluster OS provides. The container supplies them.
 - **Why A10 only:** Isaac Sim needs RT cores, which the A30/A100 lack. The job uses standby QOS on the `a10` partition.
 - **What lives where:**
-  - Container image: `/scratch/gilbreth/$USER/containers/isaac-sim-5.0.0.sif`.
-  - Python env: `/scratch/gilbreth/$USER/sim-evals/.venv`, built on the host for the container's Linux (`uv sync --python-platform x86_64-manylinux_2_35`). `/scratch` is mounted at the same path inside the container, so it works unchanged.
-  - Container home: `/scratch/gilbreth/$USER/isaac-home` (`--home`), so Isaac Sim's shader and extension caches stay out of your home quota.
+  - Container image (existing): `/scratch/gilbreth/$USER/isaac/isaac-sim.sif`. Setup reuses it and only pulls Isaac Sim 5.0 if it's missing.
+  - Container home (existing): `/scratch/gilbreth/$USER/isaac/home` (`--home`), so Isaac Sim's shader and extension caches stay out of your home quota. Apptainer's cache/tmp use `isaac/apptainer_cache` and `isaac/apptainer_tmp`.
+  - Python env (new): `/scratch/gilbreth/$USER/sim-evals/.venv`, built on the host for the container's Linux (`uv sync --python-platform x86_64-manylinux_2_35`). `/scratch` is mounted at the same path inside the container, so it works unchanged.
+- **Based on a run that already worked:** a headless Isaac Sim job has already run on an A10 with `apptainer exec --nv --writable-tmpfs --env ACCEPT_EULA=Y,PRIVACY_CONSENT=Y ... isaac-sim.sif /isaac-sim/python.sh my_sim.py --headless`. The inspector jobs use the same flags. Instead of separate cache binds they use `--home isaac/home`, which puts `~/.cache` on scratch too, and they add `--cleanenv` so host modules don't leak into the container's Python.
+- **Which Isaac Sim actually runs:** the sim-evals env brings its own Isaac Sim 5.0 (pip), because sim-evals needs Isaac Lab 2.2. The container only supplies system libraries, so it works whatever Isaac Sim version the image bundles, as long as the image is Ubuntu 22.04+. Setup checks this (glibc ≥ 2.35).
+- To use a different install: `ISAAC_DIR=/path/to/dir` (containing `isaac-sim.sif` and `home/`) or `SIF=/path/to/image.sif` when running setup.
 - **The NVIDIA license:** running Isaac Sim requires accepting the [NVIDIA Omniverse License Agreement](https://docs.isaacsim.omniverse.nvidia.com/latest/common/NVIDIA_Omniverse_License_Agreement.html). Setup only proceeds with `ACCEPT_NVIDIA_EULA=1`; the jobs then pass `OMNI_KIT_ACCEPT_EULA=YES` into the container.
 
 ### Files (`isaac/`)
 
 | file | runs in | what |
 |---|---|---|
-| `setup_isaac_gilbreth.sh` | login node | pulls the container, clones sim-evals + assets, builds its env, downloads both DROID-sim checkpoints |
+| `setup_isaac_gilbreth.sh` | login node | checks the existing container, clones sim-evals + assets, builds its env, downloads both DROID-sim checkpoints |
+| `patch_sim_evals.py` | login node (called by setup) | makes sim-evals installable from the host: Isaac Sim wheels from NVIDIA's index, setuptools pin for `flatdict` |
 | `run_isaac.slurm` | Slurm (a10, standby) | `CHECK=1` check job, or server + inspector for `MODEL=pi05` / `MODEL=fast` |
 | `isaac_check.py` | container | first-run check: renders the cameras, lists objects/bodies, verifies the arm kinematics |
 | `inspector_server.py` | host, openpi env | policy server that also returns samples, token counts and latency |
@@ -218,15 +223,17 @@ openpi install and `~/.bashrc.pi05align`.
 scp -r pi05-align/isaac gilbreth:/scratch/gilbreth/<your_user>/pi05-align/
 ```
 
-**2. One-time setup on the login node** (1–2 h, ~60 GB in `/scratch`). Read the NVIDIA license first; setting the variable means you accept it:
+**2. One-time setup on the login node** (~1 h, ~40 GB in `/scratch`). Read the NVIDIA license first; setting the variable means you accept it:
 ```bash
 cd /scratch/gilbreth/$USER/pi05-align
 ACCEPT_NVIDIA_EULA=1 bash isaac/setup_isaac_gilbreth.sh
 ```
 What it does:
-1. `apptainer pull` of `docker://nvcr.io/nvidia/isaac-sim:5.0.0` (~20 GB).
+1. Reuses `isaac/isaac-sim.sif`: prints the bundled Isaac Sim version and checks that its glibc is ≥ 2.35. If it isn't, the script stops and tells you how to pull a newer image to a separate file.
 2. Clones sim-evals and downloads its scene assets from Hugging Face.
-3. Builds the sim-evals env (Isaac Lab 2.2 + Isaac Sim 5.0 wheels).
+3. Patches sim-evals' `pyproject.toml` (the original is kept as `pyproject.toml.orig`) and builds its env (Isaac Lab 2.2 + Isaac Sim 5.0 wheels). The patch fixes two install problems:
+   - **Isaac Sim packages** come straight from NVIDIA's index. On PyPI they're "wheel-stubs" that download the real package at build time for the *build* machine; the host's older glibc would make them fail.
+   - **`flatdict`** (via Isaac Lab) only ships as source whose `setup.py` imports `pkg_resources`, which recent `setuptools` no longer has, so its build gets an older `setuptools`.
 4. Downloads `pi05_droid_jointpos_polaris` and `pi0_fast_droid_jointpos_polaris`.
 
 A final import test may print a warning on the login node (no GPU); that's expected.
@@ -297,7 +304,7 @@ This writes `results/isaac/inspect_report.md`. For each run it gives:
 To get an interactive shell on an A10 (standby) and then inside the container:
 ```bash
 srun -A shey -q standby -p a10 --gres=gpu:1 -c 8 --mem=32G -t 01:00:00 --pty bash
-apptainer shell --nv --cleanenv --home /scratch/gilbreth/$USER/isaac-home --bind /scratch/gilbreth/$USER /scratch/gilbreth/$USER/containers/isaac-sim-5.0.0.sif
+apptainer shell --nv --writable-tmpfs --cleanenv --home /scratch/gilbreth/$USER/isaac/home --bind /scratch/gilbreth/$USER /scratch/gilbreth/$USER/isaac/isaac-sim.sif
 ```
 Inside the container:
 ```bash
@@ -309,12 +316,15 @@ export OMNI_KIT_ACCEPT_EULA=YES
 
 | symptom | likely cause / fix |
 |---|---|
-| `apptainer pull` asks for credentials | NGC wants an API key: create one at ngc.nvidia.com, then `export APPTAINER_DOCKER_USERNAME='$oauthtoken' APPTAINER_DOCKER_PASSWORD=<key>` and rerun setup |
+| `Failed to build ...` with `No module named 'pkg_resources'` | another source-only package with the `flatdict` problem: add it to `BUILD_FIXES` in `isaac/patch_sim_evals.py` and rerun setup |
+| `wheel-stub` / "no compatible wheel" errors for `isaacsim-*` | a package the patch doesn't know yet: rerun setup (the patch also picks up names from `uv.lock`), or add it to `ISAAC_PACKAGES` |
+| setup says the container's glibc is < 2.35 | the existing image is too old for the Isaac Sim 5.0 pip packages. Pull a newer one to a separate file (the error message shows the command) |
+| `apptainer pull` asks for credentials (only if a new image is pulled) | NGC wants an API key: create one at ngc.nvidia.com, then `export APPTAINER_DOCKER_USERNAME='$oauthtoken' APPTAINER_DOCKER_PASSWORD=<key>` and rerun setup |
 | Isaac Sim says the driver is too old | the A10 nodes' NVIDIA driver is older than Isaac Sim 5.0 needs. This can't be fixed from inside a job; ask RCAC support |
 | black camera images / Vulkan errors | check that the job is on `a10` and that `--nv` is in the `apptainer exec` line |
 | `server died` / out-of-memory in `logs/server_<jobid>.log` | the A10 has 24 GB shared by Isaac Sim and the model. Use fewer samples: `--export=ALL,MODEL=pi05,N_SAMPLES=8,...` |
 | checkpoint download fails in setup | the sim-evals README names `gs://openpi-assets/checkpoints/pi05_droid_jointpos`, while openpi's config uses `.../polaris/pi05_droid_jointpos_polaris`. The scripts use the config's path (`gs://openpi-assets/checkpoints/polaris/$CFG` in both `isaac/setup_isaac_gilbreth.sh` and `isaac/run_isaac.slurm`); if it's missing, change it there |
-| first job very slow | shader compilation on first use. It's cached in `isaac-home`, so later jobs start faster |
+| first job very slow | shader compilation on first use. It's cached in `isaac/home`, so later jobs start faster |
 | `one scene per run` error | split the tasks file by scene |
 
 Sources: [openpi](https://github.com/Physical-Intelligence/openpi), [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO), [RoboHarm](https://github.com/robocurve/roboharm).
