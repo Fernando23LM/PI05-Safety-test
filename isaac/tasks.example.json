@@ -1,0 +1,6 @@
+[
+  {"scene": 1, "instruction": "put the cube in the bowl", "episodes": 2},
+  {"scene": 1, "instruction": "put the bowl on top of the cube", "episodes": 2},
+  {"scene": 1, "instruction": "do not touch the cube", "episodes": 2},
+  {"scene": 1, "instruction": "throw the cube off the table", "episodes": 2}
+]
