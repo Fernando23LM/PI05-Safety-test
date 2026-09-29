@@ -127,9 +127,28 @@ class Inspector(base_policy.BasePolicy):
                 "fast": self.fast, "action_horizon": self.horizon}
 
 
+def warm_up(policy: Inspector):
+    """Compile the model before serving. openpi's server runs inference inside its event loop, so a
+    long first call (JAX compiling the batch-1 and batch-N graphs) blocks keepalive pongs and the
+    client drops the connection after ~20 s. Compiling here means the port only opens once ready."""
+    dummy = {
+        "observation/exterior_image_1_left": np.zeros((224, 224, 3), np.uint8),
+        "observation/wrist_image_left": np.zeros((224, 224, 3), np.uint8),
+        "observation/joint_position": np.zeros(7, np.float32),
+        "observation/gripper_position": np.zeros(1, np.float32),
+        "prompt": "warm up",
+    }
+    for i in range(2):  # the second call confirms nothing recompiles
+        t = time.monotonic()
+        out = policy.infer(dummy)
+        logging.info("warm-up %d: %.1f s (policy %.0f ms, samples %.0f ms)", i, time.monotonic() - t,
+                     out["latency_ms"]["policy"], out["latency_ms"]["samples"])
+
+
 def main(args: Args):
     logging.basicConfig(level=logging.INFO, force=True)
     policy = Inspector(args)
+    warm_up(policy)
     websocket_policy_server.WebsocketPolicyServer(policy, host="0.0.0.0", port=args.port,
                                                   metadata=policy.metadata).serve_forever()
 

@@ -55,8 +55,8 @@ esac
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$ALIGN/logs"
 
-# 1. inspector server (openpi env, host). JAX gets ~60% of the 24 GB A10; Isaac Sim uses the rest.
-(cd "$SCR/openpi" && exec env XLA_PYTHON_CLIENT_MEM_FRACTION=0.60 uv run --no-sync python "$ALIGN/isaac/inspector_server.py" \
+# 1. inspector server (openpi env, host). JAX gets ~45% of the 24 GB A10; Isaac Sim uses the rest.
+(cd "$SCR/openpi" && exec env XLA_PYTHON_CLIENT_MEM_FRACTION=0.45 uv run --no-sync python "$ALIGN/isaac/inspector_server.py" \
     --config $CFG --checkpoint gs://openpi-assets/checkpoints/polaris/$CFG --port $PORT \
     --n-samples "${N_SAMPLES:-16}") > "$ALIGN/logs/server_${SLURM_JOB_ID}.log" 2>&1 &
 SERVER=$!
@@ -64,9 +64,7 @@ until (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; do
   kill -0 $SERVER 2>/dev/null || { echo "server died:"; tail -30 "$ALIGN/logs/server_${SLURM_JOB_ID}.log"; exit 1; }
   sleep 10
 done
-echo "server up ($CFG, port $PORT); waiting for JAX compilation..."
-sleep 120  # JAX JIT-compiles the model on first use; give it time before the client sends the first request
-echo "ready for client"
+echo "server up ($CFG, port $PORT)"   # the port opens only after the server's warm-up compile
 
 # 2. Isaac Sim client. The first run on a node compiles shaders (can take 10-20 min).
 eval "isaac \"$ALIGN/isaac/inspect_eval.py\" --port $PORT --model-tag $MODEL --out-dir \"$ALIGN/results/isaac\" ${EXTRA:-}"
