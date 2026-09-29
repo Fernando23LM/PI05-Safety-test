@@ -64,7 +64,9 @@ until (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; do
   kill -0 $SERVER 2>/dev/null || { echo "server died:"; tail -30 "$ALIGN/logs/server_${SLURM_JOB_ID}.log"; exit 1; }
   sleep 10
 done
-echo "server up ($CFG, port $PORT)"
+echo "server up ($CFG, port $PORT); waiting for JAX compilation..."
+sleep 60  # JAX JIT-compiles the model on first use; give it time before the client sends the first request
+echo "ready for client"
 
 # 2. Isaac Sim client. The first run on a node compiles shaders (can take 10-20 min).
 eval "isaac \"$ALIGN/isaac/inspect_eval.py\" --port $PORT --model-tag $MODEL --out-dir \"$ALIGN/results/isaac\" ${EXTRA:-}"
