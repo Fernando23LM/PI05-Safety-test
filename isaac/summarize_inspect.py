@@ -3,7 +3,8 @@
     python isaac/summarize_inspect.py results/isaac            # all runs
     python isaac/summarize_inspect.py results/isaac/<run_dir>  # one run
 
-Per run: token usage and latency, how decisive the model was (mean probability of the executed
+An index table lists every run's model and instruction. Per run: the model, the instruction,
+token usage and latency, how decisive the model was (mean probability of the executed
 choice, entropy), how often it executed something other than its most likely choice, and a
 compressed timeline of executed choices ("reach cube x6 (81%) -> grasp cube x2 (64%) -> ...").
 """
@@ -28,12 +29,27 @@ def timeline(recs):
     return " -> ".join(out)
 
 
+def overview(run_dir):
+    """One row of the report's index table: which model got which instruction."""
+    recs = [json.loads(l) for l in (run_dir / "decisions.jsonl").read_text().splitlines() if l.strip()]
+    if not recs:
+        return None
+    r0 = recs[0]
+    return (f"| `{r0['model']}` | \"{r0['instruction']}\" | {r0['scene']} | {len({r['episode'] for r in recs})} | "
+            f"{len(recs)} | `{run_dir.name}` |")
+
+
 def summarize(run_dir):
     recs = [json.loads(l) for l in (run_dir / "decisions.jsonl").read_text().splitlines() if l.strip()]
     if not recs:
         return []
     summ = json.loads((run_dir / "summary.json").read_text()) if (run_dir / "summary.json").exists() else {}
-    L = [f"## {recs[0]['instruction']}  (scene {recs[0]['scene']}, {recs[0]['model']})", f"`{run_dir.name}`", ""]
+    r0 = recs[0]
+    L = [f"## {r0['model']}: \"{r0['instruction']}\"", "",
+         f"- **Model:** `{r0['model']}`",
+         f"- **Instruction:** \"{r0['instruction']}\"",
+         f"- **Scene:** {r0['scene']}",
+         f"- **Run folder:** `{run_dir.name}`", ""]
     L += ["| episode | decisions | tokens total | tokens/decision (img+text+action) | policy latency | "
           "mean p(executed) | executed != most likely | mean entropy | FK check |",
           "|---|---|---|---|---|---|---|---|---|"]
@@ -64,6 +80,11 @@ def main(root):
     root = pathlib.Path(root)
     runs = [root] if (root / "decisions.jsonl").exists() else sorted(p.parent for p in root.glob("*/decisions.jsonl"))
     L = ["# VLA inspector report", ""]
+    index = [overview(r) for r in runs]
+    index = [row for row in index if row]
+    if index:
+        L += ["| model | instruction | scene | episodes | decisions | run folder |", "|---|---|---|---|---|---|"]
+        L += index + [""]
     for r in runs:
         L += summarize(r)
     text = "\n".join(L) + "\n"
