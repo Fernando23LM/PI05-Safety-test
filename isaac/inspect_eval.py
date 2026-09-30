@@ -138,6 +138,8 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root)
         tok_total, lat_total, timeline = 0, 0.0, []
         panel, prev_pred, fk_err = None, None, []
         t_ep = time.time()
+        # 48 px tall: 48 + 512 keeps the frame height a multiple of 16 for video codecs
+        header = ic.render_header(448 + args.panel_width, meta.get("model", args.model_tag), instruction)
         for step in range(max_steps):
             if plan is None or k >= args.open_loop_horizon:
                 req = _request(obs, instruction)
@@ -181,7 +183,7 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root)
                 cv2.resize(pol["wrist_cam"][0].cpu().numpy(), (448, 256))], axis=0)
             panel = ic.render_panel(views.shape[0], args.panel_width, title, d, tokens, resp["latency_ms"],
                                     f"task: {instruction}"[:60])
-            frames.append(np.concatenate([views, panel], axis=1))
+            frames.append(np.concatenate([header, np.concatenate([views, panel], axis=1)], axis=0))
             if bool(term) or bool(trunc):
                 break
 

@@ -145,6 +145,23 @@ def decide(samples, executed, p0, gripper_now, objects, offset):
 
 
 # --------------------------------------------------------------------------- drawing
+def render_header(width, model, instruction, height=48):
+    """Top bar for the video: model name, then the instruction it was given. Returns uint8 RGB."""
+    import cv2
+
+    img = np.full((height, width, 3), (12, 18, 30), np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    def fit(s, scale):  # shorten with an ellipsis until it fits the bar
+        while len(s) > 4 and cv2.getTextSize(s, font, scale, 1)[0][0] > width - 28:
+            s = s[:-4] + "..."
+        return s
+
+    cv2.putText(img, fit(f"Model: {model}", 0.55), (14, 20), font, 0.55, (90, 170, 255), 1, cv2.LINE_AA)
+    cv2.putText(img, fit(f'Instruction: "{instruction}"', 0.55), (14, 40), font, 0.55, (235, 235, 235), 1, cv2.LINE_AA)
+    return img
+
+
 def render_panel(height, width, title, decision, tokens, latency, step_info):
     """Dark side panel in the style of an agent 'current state' card. Returns uint8 RGB."""
     import cv2
