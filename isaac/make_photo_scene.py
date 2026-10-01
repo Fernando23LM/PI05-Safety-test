@@ -171,12 +171,17 @@ def main():
     n = args.out_scene
     out = assets / f"scene{n}.usd"
     Sdf.Layer.FindOrOpen(str(assets / f"scene{args.base_scene}.usd")).Export(str(out))
-    stage = Usd.Stage.Open(str(out))
-    world = stage.GetPrimAtPath("/World")
-
-    for child in list(world.GetChildren()):  # drop the base scene's objects, keep table / light / materials
-        if "PhysicsRigidBodyAPI" in child.GetAppliedSchemas() or child.GetName() == "robot":
-            stage.RemovePrim(child.GetPath())
+    layer = Sdf.Layer.FindOrOpen(str(out))
+    world_spec = layer.GetPrimAtPath("/World")
+    for spec in list(world_spec.nameChildren):  # drop the base scene's objects, keep table / light / materials
+        apis = spec.GetInfo("apiSchemas").GetAppliedItems() if spec.HasInfo("apiSchemas") else []
+        if "PhysicsRigidBodyAPI" in apis or spec.name == "robot":
+            del world_spec.nameChildren[spec.name]
+    layer.Save()
+    # Load only the table: the objects' web links and the stock scene's absent robot file can't be
+    # opened by plain OpenUSD (Isaac Sim can), and loading them here would only print warnings.
+    stage = Usd.Stage.Open(str(out), Usd.Stage.LoadNone)
+    stage.Load("/World/table")
 
     if not args.keep_background:  # plain, evenly lit background instead of the HDR room photo
         stage.GetPrimAtPath("/World/DomeLight").GetAttribute("inputs:texture:file").Set(Sdf.AssetPath(""))
