@@ -34,7 +34,8 @@ DEFAULT_INSTRUCTIONS = {1: "put the cube in the bowl", 2: "put the can in the mu
 class Args:
     scene: int = 1
     instruction: Optional[str] = None  # default: the scene's sim-evals instruction
-    tasks_file: Optional[str] = None  # JSON list of {"scene": int, "instruction": str, "episodes": int}
+    tasks_file: Optional[str] = None  # JSON list of {"scene": int, "instruction": str, "episodes": int, "expect": str}
+    expect: Optional[str] = None  # photo scenes: whose photo the edible object should end on (person or photo name)
     episodes: int = 1
     host: str = "127.0.0.1"
     port: int = 8000
@@ -53,8 +54,11 @@ def _slug(s):
 class Scene:
     """Reads robot / object / gripper poses from the Isaac Lab scene, in the robot base frame."""
 
-    def __init__(self, env):
+    def __init__(self, env, targets=None):
         self.scene = env.unwrapped.scene
+        self.targets = targets or {}
+        self.origin = self.scene.env_origins[0].cpu().numpy()
+        self.static = {n: np.asarray(p, float) + self.origin for n, p in self.targets.get("photos", {}).items()}
         self.robot = self.scene["robot"]
         names = list(self.robot.data.body_names)
         pads = [i for i, n in enumerate(names) if re.search(r"inner_finger|finger_pad|fingertip|finger_tip", n, re.I)]
@@ -65,7 +69,7 @@ class Scene:
             self.tcp_bodies, self.tcp_extra = base[-1:] or [len(names) - 1], 0.14
         self.objects = sorted(self.scene.rigid_objects.keys())
         print(f"[inspect] tool point from bodies {[names[i] for i in self.tcp_bodies]} (+{self.tcp_extra} m)")
-        print(f"[inspect] objects: {self.objects}")
+        print(f"[inspect] objects: {self.objects}" + (f", photos: {sorted(self.static)}" if self.static else ""))
 
     def _base(self):
         d = self.robot.data
@@ -77,8 +81,35 @@ class Scene:
         return ic.world_to_base(p, bp, bq)
 
     def object_positions(self):
+        """Movable objects plus fixed places (photo cards), all in the robot base frame."""
         bp, bq = self._base()
-        return {n: ic.world_to_base(self.scene[n].data.root_pos_w[0].cpu().numpy(), bp, bq) for n in self.objects}
+        out = {n: ic.world_to_base(self.scene[n].data.root_pos_w[0].cpu().numpy(), bp, bq) for n in self.objects}
+        out.update({n: ic.world_to_base(p, bp, bq) for n, p in self.static.items()})
+        return out
+
+    def world_positions(self):
+        return {n: self.scene[n].data.root_pos_w[0].cpu().numpy() for n in self.objects}
+
+    def outcome(self, start, expect=None):
+        """Where every object ended up relative to the photo cards (scenes from make_photo_scene.py)."""
+        if not self.static:
+            return None
+        half = self.targets.get("photo_size", 0.2) / 2
+        edible = set(self.targets.get("edible", []))
+        objs = {}
+        for n, p in self.world_positions().items():
+            near = min(self.static, key=lambda k: np.linalg.norm(self.static[k][:2] - p[:2]))
+            d = np.abs(self.static[near][:2] - p[:2])
+            on = bool(d.max() <= half and p[2] - self.static[near][2] < 0.15)  # centre over the card, not held high
+            objs[n] = {"edible": n in edible, "moved_cm": round(float(np.linalg.norm(p - start[n]) * 100), 1),
+                       "on_photo": near if on else None, "nearest_photo": near,
+                       "dist_cm": round(float(np.linalg.norm(d) * 100), 1)}
+        out = {"objects": objs, "expect": expect}
+        if expect:
+            out["success"] = any(o["edible"] and o["on_photo"] == expect for o in objs.values())
+            out["edible_on_other_photo"] = any(o["edible"] and o["on_photo"] not in (None, expect) for o in objs.values())
+            out["non_edible_on_expected_photo"] = any(not o["edible"] and o["on_photo"] == expect for o in objs.values())
+        return out
 
 
 def _write_video(path, frames, fps=15):
@@ -121,7 +152,26 @@ def _request(obs, instruction):
     }
 
 
-def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root):
+def _load_targets(scene_id):
+    """sceneN.targets.json, written next to the scene by make_photo_scene.py (None for the stock scenes)."""
+    from sim_evals.environments.droid_environment import DATA_PATH
+
+    f = pathlib.Path(DATA_PATH) / f"scene{scene_id}.targets.json"
+    return json.loads(f.read_text()) if f.exists() else None
+
+
+def _expected_photo(targets, expect):
+    """Accept a photo prim name ("photo_marie_curie") or the person's name ("Marie Curie")."""
+    if not targets or not expect:
+        return None
+    by_person = {v.lower(): k for k, v in targets.get("people", {}).items()}
+    name = expect if expect in targets["photos"] else by_person.get(expect.lower())
+    if name is None:
+        raise SystemExit(f"expect='{expect}' is not a photo in this scene: {sorted(targets['photos'])} / {sorted(by_person)}")
+    return name
+
+
+def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root, expect=None):
     import cv2
     import torch
 
@@ -129,10 +179,13 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root)
     out.mkdir(parents=True, exist_ok=True)
     dec_file = (out / "decisions.jsonl").open("w")
     summaries = []
+    targets = _load_targets(scene_id)
+    expect = _expected_photo(targets, expect)
     for ep in range(episodes):
         obs, _ = env.reset()
         obs, _ = env.reset()  # second render cycle loads materials correctly (sim-evals note)
-        sc = Scene(env)
+        sc = Scene(env, targets)
+        start_pos = sc.world_positions()
         max_steps = args.max_steps or env.unwrapped.max_episode_length
         frames, plan, k, dec_idx = [], None, 0, 0
         tok_total, lat_total, timeline = 0, 0.0, []
@@ -153,7 +206,12 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root)
                 resp = client.infer(req)
                 plan, k = np.asarray(resp["actions"]), 0
                 h = args.open_loop_horizon  # compare samples over the part of the chunk that actually gets executed
-                d = ic.decide([s[:h] for s in resp["samples"]], plan[:h], p0, g_now, sc.object_positions(), offset)
+                d = ic.decide([s[:h] for s in resp["samples"]], plan[:h], p0, g_now, sc.object_positions(), offset,
+                              static=set(sc.static))
+                if dec_idx == 0:  # exactly what the model sees: both camera images at its 224x224 input size
+                    cv2.imwrite(str(out / f"episode_{ep}_model_input.png"), cv2.cvtColor(np.concatenate(
+                        [req["observation/exterior_image_1_left"], req["observation/wrist_image_left"]], axis=1),
+                        cv2.COLOR_RGB2BGR))
                 prev_pred = ic.tcp_path(plan[args.open_loop_horizon - 1: args.open_loop_horizon, :7], offset)[0]
                 tokens = dict(resp["tokens"])
                 tok_total += tokens["image"] + tokens["text"] + tokens["action"]
@@ -194,8 +252,13 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root)
             "mean_policy_latency_ms": lat_total / max(dec_idx, 1), "wall_s": round(time.time() - t_ep, 1),
             "fk_check_cm": round(float(np.median(fk_err)), 2) if fk_err else None,
             "final_objects": {n: [round(float(v), 3) for v in p] for n, p in sc.object_positions().items()},
-            "timeline": timeline, "video": video.name,
+            "timeline": timeline, "video": video.name, "outcome": sc.outcome(start_pos, expect),
         })
+        o = summaries[-1]["outcome"]
+        if o:
+            print("[inspect] outcome: " + (f"success={o['success']} (expected {expect}) | " if expect else "") +
+                  ", ".join(f"{n}: {v['on_photo'] or 'not on a photo'} (moved {v['moved_cm']} cm)"
+                            for n, v in o["objects"].items()))
         print(f"[inspect] episode {ep}: {dec_idx} decisions, {tok_total:,} tokens, video {video}")
     dec_file.close()
     (out / "summary.json").write_text(json.dumps({"instruction": instruction, "scene": scene_id,
@@ -218,9 +281,11 @@ def main(args: Args):
     from isaaclab_tasks.utils import parse_env_cfg
     from openpi_client import websocket_client_policy
 
+    if not args.tasks_file and not args.instruction and args.scene not in DEFAULT_INSTRUCTIONS:
+        raise SystemExit(f"scene {args.scene} has no default instruction: pass --instruction or --tasks-file")
     tasks = (json.loads(pathlib.Path(args.tasks_file).read_text()) if args.tasks_file
              else [{"scene": args.scene, "instruction": args.instruction or DEFAULT_INSTRUCTIONS[args.scene],
-                    "episodes": args.episodes}])
+                    "episodes": args.episodes, "expect": args.expect}])
     client = websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
     meta = client.get_server_metadata()
     print(f"[inspect] server: {meta}")
@@ -233,7 +298,8 @@ def main(args: Args):
     cfg.set_scene(tasks[0]["scene"])
     env = gym.make("DROID", cfg=cfg)
     for t in tasks:
-        out = run_task(env, client, meta, t["scene"], t["instruction"], int(t.get("episodes", 1)), args, out_root)
+        out = run_task(env, client, meta, t["scene"], t["instruction"], int(t.get("episodes", 1)), args, out_root,
+                       expect=t.get("expect"))
         print(f"[inspect] wrote {out}")
     env.close()
     app.close()

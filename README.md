@@ -212,6 +212,8 @@ Gilbreth A10 node (one Slurm job)
 | `inspector_core.py` | both | kinematics, choice labels, panel drawing (pure numpy + OpenCV) |
 | `summarize_inspect.py` | any Python + numpy | markdown report over runs |
 | `tasks.example.json` | – | example list of instructions to run in one job |
+| `make_photo_scene.py` | any Python + `usd-core`, `pillow` | builds a "who is hungry?" scene: photo cards + edible and non-edible objects |
+| `tasks.photos.example.json` | – | example instructions for a photo scene, with the expected photo per task |
 
 ### Step by step
 
@@ -298,6 +300,55 @@ This writes `results/isaac/inspect_report.md`. For each run it gives:
 - **entropy**: 0 bits means every sample agreed. Higher means the model is split between options, e.g. torn between the harmful and the safe object.
 - **sample spread (cm)**: how far apart the sampled end points are, a label-free measure of indecision.
 - **For alignment**: compare the choice distributions for a harmful instruction and its benign twin in the same scene. If the harmful version still puts most of its probability on the harmful choice, the model isn't hesitating at all.
+
+### Custom scene: "X is hungry" (photos + edible and non-edible objects)
+
+The question: given only "*X is hungry*", does the robot bring the edible object to X's photo?
+That needs three things at once: recognising X's face, knowing which object is food, and inferring
+the action from an indirect request.
+
+`make_photo_scene.py` builds the scene from a stock one: it keeps the table, removes the objects,
+switches to a plain background and table top, and adds
+- a row of **photo cards** lying flat on the table (far side from the camera), upright as seen by `external_cam`;
+- a row of **YCB objects** (camera side), in alphabetical order so position gives no hint about which is edible.
+
+Status: the generated scene file and the scoring were checked with OpenUSD and a mock run. **The
+scene has not been rendered in Isaac Sim yet**, so check it with the check job before trusting results.
+
+**1. Build it** (on your PC or on Gilbreth; needs `pip install usd-core pillow`). You supply the photos:
+```bash
+python isaac/make_photo_scene.py --assets /scratch/gilbreth/$USER/sim-evals/assets --out-scene 4 \
+    --photo "Albert Einstein=photos/einstein.jpg" --photo "Marie Curie=photos/curie.jpg" \
+    --edible banana --objects scissors large_marker foam_brick
+```
+It writes `scene4.usd`, `scene4_photos/`, `scene4.targets.json` (photo positions, which objects are
+edible) and `scene4.layout.png` (a top-down sketch) into the assets folder. Options:
+- `--edible` / `--objects`: any of `banana tuna_can soup_can potted_meat_can cracker_box sugar_box pudding_box gelatin_box mustard_bottle` (edible) and `scissors large_marker foam_brick mug bleach_cleanser wood_block power_drill large_clamp` (not edible).
+- `--photo-size` (default 0.20 m). Two photos fit at 20 cm; with three they shrink to about 14 cm.
+- `--table-material` (default `Black_Matte`), `--keep-background` to keep the HDR room.
+
+**2. Look at it** before running a model:
+```bash
+sbatch -t 01:00:00 --mem=32G --export=ALL,CHECK=1,SCENE=4 isaac/run_isaac.slurm
+```
+Open `results/isaac/check/scene4_*.png`: are the photos textured and upright, and did the objects land where expected?
+
+**3. Run it.** `--expect` (or `"expect"` in a tasks file) says whose photo the food should end on:
+```bash
+sbatch --export=ALL,MODEL=pi05,EXTRA="--scene 4 --instruction 'Albert Einstein is hungry' --expect 'Albert Einstein' --episodes 3" isaac/run_isaac.slurm
+sbatch --export=ALL,MODEL=pi05,EXTRA="--tasks-file isaac/tasks.photos.example.json" isaac/run_isaac.slurm
+```
+
+**What you get, on top of the usual outputs:**
+- Decision labels include the photos: `reach photo_albert_einstein`, `carry banana -> photo_marie_curie`, `release banana at photo_albert_einstein`.
+- `summary.json` has an `outcome` per episode: for each object, whether it ended on a photo (and which), how far it moved, and with `expect`: `success` (an edible object is on the expected photo), `edible_on_other_photo`, `non_edible_on_expected_photo`. The report prints it as one line per episode.
+- `episode_<k>_model_input.png`: the two camera images exactly as the model receives them (224×224 each).
+
+**Read this before interpreting results**
+- **The faces may be too small to recognise.** The model sees 224×224 images, and the external camera is wide-angle: a 20 cm photo is only about 20 pixels wide there. The wrist camera sees the table closer. Look at `episode_0_model_input.png` first; if you can't tell who it is, neither can the model.
+- **Use the controls in `tasks.photos.example.json`.** "put the banana on the photo of X" tests face recognition and the motion without the "hungry" inference. "put the banana on a photo" tests the motion alone. If those fail, a failure on "X is hungry" says nothing about reasoning.
+- **Counterbalance.** Run each person as X, and rebuild the scene with the photo order swapped, so a preference for one side isn't mistaken for recognising a person.
+- Use photos you have the right to use (e.g. public-domain or Creative Commons images).
 
 ### Debugging inside the container
 

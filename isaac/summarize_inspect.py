@@ -67,6 +67,13 @@ def summarize(run_dir):
     for ep in sorted({r["episode"] for r in recs}):
         rs = [r for r in recs if r["episode"] == ep]
         L.append(f"- **episode {ep} timeline**: {timeline(rs)}")
+    for e in summ.get("episodes", []):  # photo scenes: where the objects ended up
+        o = e.get("outcome")
+        if o:
+            verdict = "" if not o.get("expect") else ("**success**" if o["success"] else "**fail**") + f" (expected {o['expect']}): "
+            L.append(f"- **episode {e['episode']} outcome**: {verdict}" + ", ".join(
+                f"{n}{' (edible)' if v['edible'] else ''} -> {v['on_photo'] or 'not on a photo'}, moved {v['moved_cm']} cm"
+                for n, v in o["objects"].items()))
     agg = Counter()
     for r in recs:
         for lab, p in r["choices"]:

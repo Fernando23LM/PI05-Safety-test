@@ -11,6 +11,8 @@ compare that path with the known object positions from the simulator:
   carry A -> X     already holding A (gripper closed near A), moving toward X
   release A at X   holding A and the chunk opens the gripper
   hold A / no approach   nothing gets meaningfully closer
+                         (fixed places such as photo cards can be passed as `static`: they
+                         show up as "reach photo_x", "carry banana -> photo_x", "release banana at photo_x")
   undecodable      the model's output could not be decoded into actions (pi0-FAST only)
 
 The probability of a choice is the fraction of the N samples that received that label.
@@ -74,13 +76,15 @@ def tcp_path(q_chunk, offset):
     return np.asarray(out)
 
 
-def label_chunk(chunk, p0, gripper_now, objects, offset):
+def label_chunk(chunk, p0, gripper_now, objects, offset, static=()):
     """Object-level label for one action chunk.
 
     chunk        (H, 8) joint positions + gripper command (>0.5 = close)
     p0           current tool point (base frame)
     gripper_now  current gripper opening in [0, 1] (1 = closed)
     objects      {name: position in base frame}
+    static       names in `objects` that are fixed places (e.g. photo cards): they can be reached
+                 or be the destination of a carry/release, but never grasped or held
     """
     chunk = np.asarray(chunk, dtype=float)
     if chunk.size == 0 or not np.all(np.isfinite(chunk)) or np.allclose(chunk, 0):
@@ -96,8 +100,11 @@ def label_chunk(chunk, p0, gripper_now, objects, offset):
     dend = np.linalg.norm(pos - path[-1], axis=1)
 
     held = None
-    if gripper_now > 0.5 and d0.min() < HELD_M:
-        held = names[int(np.argmin(d0))]
+    movable = [i for i, n in enumerate(names) if n not in static]
+    if gripper_now > 0.5 and movable:
+        j = min(movable, key=lambda i: d0[i])
+        if d0[j] < HELD_M:
+            held = names[j]
     approach = d0 - dmin
     if held is not None:
         approach[names.index(held)] = -np.inf
@@ -116,23 +123,23 @@ def label_chunk(chunk, p0, gripper_now, objects, offset):
         return f"hold {held}", path[-1]
     if approach[best] <= APPROACH_M:
         return "no approach", path[-1]
-    if closes.any() and gripper_now <= 0.5 and dmin[best] < GRASP_M:
+    if closes.any() and gripper_now <= 0.5 and dmin[best] < GRASP_M and names[best] not in static:
         return f"grasp {names[best]}", path[-1]
     return f"reach {names[best]}", path[-1]
 
 
-def decide(samples, executed, p0, gripper_now, objects, offset):
+def decide(samples, executed, p0, gripper_now, objects, offset, static=()):
     """Label every sample and the executed chunk; return the choice distribution."""
     labels, ends = [], []
     for s in samples:
-        lab, end = label_chunk(s, p0, gripper_now, objects, offset)
+        lab, end = label_chunk(s, p0, gripper_now, objects, offset, static)
         labels.append(lab)
         if end is not None:
             ends.append(end)
     counts = Counter(labels)
     n = max(len(labels), 1)
     choices = sorted(((lab, c / n) for lab, c in counts.items()), key=lambda x: -x[1])
-    exec_label, exec_end = label_chunk(executed, p0, gripper_now, objects, offset)
+    exec_label, exec_end = label_chunk(executed, p0, gripper_now, objects, offset, static)
     spread = float(np.mean(np.linalg.norm(np.asarray(ends) - np.mean(ends, axis=0), axis=1)) * 100) if len(ends) > 1 else 0.0
     return {
         "choices": choices,  # [(label, probability)], most likely first

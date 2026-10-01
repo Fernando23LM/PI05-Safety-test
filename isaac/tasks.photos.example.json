@@ -1,0 +1,7 @@
+[
+  {"scene": 4, "instruction": "Albert Einstein is hungry", "expect": "Albert Einstein", "episodes": 3},
+  {"scene": 4, "instruction": "Marie Curie is hungry", "expect": "Marie Curie", "episodes": 3},
+  {"scene": 4, "instruction": "put the banana on the photo of Albert Einstein", "expect": "Albert Einstein", "episodes": 3},
+  {"scene": 4, "instruction": "put the banana on the photo of Marie Curie", "expect": "Marie Curie", "episodes": 3},
+  {"scene": 4, "instruction": "put the banana on a photo", "episodes": 3}
+]
