@@ -40,7 +40,8 @@ class Args:
     host: str = "127.0.0.1"
     port: int = 8000
     open_loop_horizon: int = 8  # control steps executed per decision (sim-evals default)
-    max_steps: Optional[int] = None  # default: env episode length (30 s = 450 steps)
+    max_steps: Optional[int] = None  # stop earlier than the episode length (15 steps = 1 s)
+    episode_seconds: Optional[float] = None  # episode length; default is sim-evals' 30 s (450 steps)
     out_dir: str = "results/isaac"
     model_tag: str = "model"
     headless: bool = True
@@ -90,14 +91,14 @@ class Scene:
     def world_positions(self):
         return {n: self.scene[n].data.root_pos_w[0].cpu().numpy() for n in self.objects}
 
-    def outcome(self, start, expect=None):
+    def outcome(self, start, final, expect=None):
         """Where every object ended up relative to the photo cards (scenes from make_photo_scene.py)."""
         if not self.static:
             return None
         half = self.targets.get("photo_size", 0.2) / 2
         edible = set(self.targets.get("edible", []))
         objs = {}
-        for n, p in self.world_positions().items():
+        for n, p in final.items():
             near = min(self.static, key=lambda k: np.linalg.norm(self.static[k][:2] - p[:2]))
             d = np.abs(self.static[near][:2] - p[:2])
             on = bool(d.max() <= half and p[2] - self.static[near][2] < 0.15)  # centre over the card, not held high
@@ -185,7 +186,7 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root,
         obs, _ = env.reset()
         obs, _ = env.reset()  # second render cycle loads materials correctly (sim-evals note)
         sc = Scene(env, targets)
-        start_pos = sc.world_positions()
+        start_pos = final_pos = sc.world_positions()
         max_steps = args.max_steps or env.unwrapped.max_episode_length
         frames, plan, k, dec_idx = [], None, 0, 0
         tok_total, lat_total, timeline = 0, 0.0, []
@@ -234,6 +235,9 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root,
             action[-1] = 1.0 if action[-1] > 0.5 else 0.0  # binarize gripper (as sim-evals does)
             k += 1
             obs, _, term, trunc, _ = env.step(torch.tensor(action, dtype=torch.float32)[None])
+            if bool(term) or bool(trunc):
+                break  # Isaac Lab has already reset the scene inside step(): obs and poses are the new episode's
+            final_pos = sc.world_positions()
 
             pol = obs["policy"]
             views = np.concatenate([
@@ -242,8 +246,6 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root,
             panel = ic.render_panel(views.shape[0], args.panel_width, title, d, tokens, resp["latency_ms"],
                                     f"task: {instruction}"[:60])
             frames.append(np.concatenate([header, np.concatenate([views, panel], axis=1)], axis=0))
-            if bool(term) or bool(trunc):
-                break
 
         video = out / f"episode_{ep}.mp4"
         _write_video(video, frames, fps=15)
@@ -251,8 +253,8 @@ def run_task(env, client, meta, scene_id, instruction, episodes, args, out_root,
             "episode": ep, "steps": step + 1, "decisions": dec_idx, "tokens_total": tok_total,
             "mean_policy_latency_ms": lat_total / max(dec_idx, 1), "wall_s": round(time.time() - t_ep, 1),
             "fk_check_cm": round(float(np.median(fk_err)), 2) if fk_err else None,
-            "final_objects": {n: [round(float(v), 3) for v in p] for n, p in sc.object_positions().items()},
-            "timeline": timeline, "video": video.name, "outcome": sc.outcome(start_pos, expect),
+            "final_objects_world": {n: [round(float(v), 3) for v in p] for n, p in final_pos.items()},
+            "timeline": timeline, "video": video.name, "outcome": sc.outcome(start_pos, final_pos, expect),
         })
         o = summaries[-1]["outcome"]
         if o:
@@ -296,6 +298,8 @@ def main(args: Args):
         raise SystemExit(f"one scene per run, got {sorted(scenes)}: split the tasks file or submit one job per scene")
     cfg = parse_env_cfg("DROID", device=app_args.device, num_envs=1, use_fabric=True)
     cfg.set_scene(tasks[0]["scene"])
+    if args.episode_seconds:  # sim-evals ends episodes at 30 s; the env's time-out follows this value
+        cfg.episode_length_s = args.episode_seconds
     env = gym.make("DROID", cfg=cfg)
     for t in tasks:
         out = run_task(env, client, meta, t["scene"], t["instruction"], int(t.get("episodes", 1)), args, out_root,

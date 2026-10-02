@@ -30,7 +30,7 @@ _FLANGE_D = 0.107
 
 APPROACH_M = 0.01  # must get at least this much closer to count as moving toward an object
 GRASP_M = 0.06  # gripper closes within this distance of an object -> "grasp"
-HELD_M = 0.08  # gripper closed and object this close -> considered held
+HELD_M = 0.12  # gripper closed and object centre this close -> considered held (long objects are held off-centre)
 PLACE_M = 0.15  # releasing within this distance of another object -> "release A at X"
 
 
