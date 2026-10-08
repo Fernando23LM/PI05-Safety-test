@@ -47,6 +47,14 @@ CATALOG = {
     "power_drill": ("035_power_drill", "_35_power_drill", False, (0.184, 0.187, 0.057), False),
     "large_clamp": ("051_large_clamp", "_51_large_clamp", False, (0.165, 0.122, 0.036), False),
 }
+# Real object masses in kg, from the published YCB object set. Without them the simulator derives the
+# mass from the collision volume at a default density (1000 kg/m3), e.g. a banana several times too heavy.
+MASS_KG = {
+    "banana": 0.066, "tuna_can": 0.171, "soup_can": 0.349, "potted_meat_can": 0.370, "cracker_box": 0.411,
+    "sugar_box": 0.514, "pudding_box": 0.187, "gelatin_box": 0.097, "mustard_bottle": 0.603, "mug": 0.118,
+    "bleach_cleanser": 1.131, "foam_brick": 0.028, "wood_block": 0.729, "scissors": 0.082, "large_marker": 0.016,
+    "power_drill": 0.895, "large_clamp": 0.125,
+}
 TURNED = {"banana", "cracker_box", "large_clamp"}  # long side along the row otherwise; turn it toward the camera
 COLLISION_APIS = ["PhysicsCollisionAPI", "PhysxCollisionAPI", "PhysxConvexHullCollisionAPI",
                   "PhysicsMeshCollisionAPI", "PhysxConvexDecompositionCollisionAPI"]
@@ -69,13 +77,16 @@ def extent(name):
     return (dy, dx, h) if name in TURNED else (dx, dy, h)
 
 
-def add_object(stage, name, pos):
+def add_object(stage, name, pos, real_mass=True):
     asset, mesh, upright, _, _ = CATALOG[name]
     prim = stage.DefinePrim(f"/World/{name}")
     prim.GetPayloads().AddPayload(f"{YCB}/{asset}.usd")
     for api in ["PhysicsRigidBodyAPI", "PhysxRigidBodyAPI", "MaterialBindingAPI"]:
         prim.AddAppliedSchema(api)
     prim.CreateRelationship("material:binding", custom=False).SetTargets([Sdf.Path("/World/PhysicsMaterial")])
+    if real_mass:  # an explicit mass takes precedence over any density
+        prim.AddAppliedSchema("PhysicsMassAPI")
+        prim.CreateAttribute("physics:mass", Sdf.ValueTypeNames.Float).Set(MASS_KG[name])
     prim.CreateAttribute("physics:kinematicEnabled", Sdf.ValueTypeNames.Bool).Set(False)
     prim.CreateAttribute("physics:rigidBodyEnabled", Sdf.ValueTypeNames.Bool).Set(True)
     xf = UsdGeom.Xformable(prim)  # sim-evals reads xformOp:translate and xformOp:orient from each rigid body
@@ -165,6 +176,11 @@ def main():
     ap.add_argument("--photo-size", type=float, default=0.20, help="side of each photo card in metres")
     ap.add_argument("--table-material", default="Black_Matte", help="a material from table.usd, e.g. Black_Matte, Oak, plastic_white")
     ap.add_argument("--keep-background", action="store_true", help="keep the base scene's HDR room instead of a plain background")
+    ap.add_argument("--friction", type=float, default=None,
+                    help="friction of the objects' physics material; default keeps the base scene's value "
+                         "(sim-evals uses 10, far above real objects at roughly 0.5-1)")
+    ap.add_argument("--default-mass", action="store_true",
+                    help="let the simulator derive masses from volume instead of using the real YCB masses")
     args = ap.parse_args()
 
     assets = pathlib.Path(args.assets)
@@ -193,6 +209,12 @@ def main():
     table_z = box.GetMax()[2]
     table = ((box.GetMin()[0], box.GetMin()[1]), (box.GetMax()[0], box.GetMax()[1]))
 
+    mat = stage.GetPrimAtPath("/World/PhysicsMaterial")  # bound to every object
+    if args.friction is not None:
+        for attr in ("physics:staticFriction", "physics:dynamicFriction"):
+            mat.GetAttribute(attr).Set(args.friction)
+    friction = mat.GetAttribute("physics:dynamicFriction").Get()
+
     # photos: one row on the far side of the table
     people = [p.split("=", 1) for p in args.photo]
     size = min(args.photo_size, (PHOTO_X[1] - PHOTO_X[0]) / len(people) - 0.02) if len(people) > 1 else args.photo_size
@@ -217,15 +239,17 @@ def main():
     objects = {}
     for name, x in zip(names, row(len(names), *OBJECT_X)):
         pos = (round(x, 4), OBJECT_Y, round(table_z + extent(name)[2] / 2 + 0.02, 4))  # dropped from 2 cm
-        add_object(stage, name, pos)
+        add_object(stage, name, pos, real_mass=not args.default_mass)
         objects[name] = (pos, name in args.edible)
 
     stage.GetRootLayer().Save()
     (assets / f"scene{n}.targets.json").write_text(json.dumps({
         "photos": photos, "people": people_names, "photo_size": round(size, 4),
-        "objects": sorted(objects), "edible": sorted(args.edible)}, indent=2))
+        "objects": sorted(objects), "edible": sorted(args.edible), "friction": friction,
+        "mass_kg": None if args.default_mass else {k: MASS_KG[k] for k in sorted(objects)}}, indent=2))
     layout_png(assets / f"scene{n}.layout.png", table, photos, objects, size, photo_files)
     print(f"wrote {out}\n  photos ({size * 100:.0f} cm): {photos}\n  objects: { {k: v[0] for k, v in objects.items()} }")
+    print(f"  friction: {friction}  masses [kg]: {'simulator default' if args.default_mass else {k: MASS_KG[k] for k in sorted(objects)}}")
     print(f"  edible: {sorted(args.edible)}\n  preview: {assets / f'scene{n}.layout.png'}")
 
 

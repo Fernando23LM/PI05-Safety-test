@@ -326,6 +326,8 @@ edible) and `scene4.layout.png` (a top-down sketch) into the assets folder. Opti
 - `--edible` / `--objects`: any of `banana tuna_can soup_can potted_meat_can cracker_box sugar_box pudding_box gelatin_box mustard_bottle` (edible) and `scissors large_marker foam_brick mug bleach_cleanser wood_block power_drill large_clamp` (not edible).
 - `--photo-size` (default 0.20 m). Two photos fit at 20 cm; with three they shrink to about 14 cm.
 - `--table-material` (default `Black_Matte`), `--keep-background` to keep the HDR room.
+- Object masses are the real YCB values by default (a banana is 66 g); `--default-mass` lets the simulator derive them from volume instead.
+- `--friction` sets the objects' friction. The default keeps sim-evals' value of 10, which makes grasps stick far better than real objects (roughly 0.5–1) would. It changes the objects' material only, not the gripper fingers', so try e.g. `--friction 1.0` and check that grasps still hold.
 
 **2. Look at it** before running a model:
 ```bash
